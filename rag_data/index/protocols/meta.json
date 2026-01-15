@@ -1,0 +1,57 @@
+[
+  {
+    "doc_id": "protocol::DECLARE_TIMI58::0",
+    "source": "protocols/DECLARE_TIMI58.md",
+    "kind": "protocol",
+    "title": "Trial: DECLARE-TIMI58",
+    "text": "# Trial: DECLARE-TIMI58\n## ID: DECLARE-TIMI58 (NCT ID not specified)\n\n### Description\nMulticenter Trial to Evaluate the Effect of Dapagliflozin on the Incidence of Cardiovascular Events.\n\n### Inclusion Criteria\n- Provision of informed consent prior to any study specific procedures\n- Female or male aged ≥40 years\n- Diagnosed with Type 2 Diabetes\n- High Risk for Cardiovascular events\n\n### Exclusion Criteria\n- Diagnosis of Type 1 diabetes mellitus\n- History of bladder cancer or history of radiation therapy to the lower abdomen or pelvis at any time\n- Chronic cystitis and/or recurrent urinary tract infections\n- Pregnant or breast-feeding patients",
+    "meta": {
+      "protocol_id": "DECLARE_TIMI58",
+      "chunk": 0
+    }
+  },
+  {
+    "doc_id": "protocol::NCT05928572_CGM_Initiation::0",
+    "source": "protocols/NCT05928572_CGM_Initiation.md",
+    "kind": "protocol",
+    "title": "Trial: My Diabetes Study - CGM Initiation Approach & Time in Range",
+    "text": "# Trial: My Diabetes Study - CGM Initiation Approach & Time in Range\n## ID: NCT05928572\n\n### Description\nMy Diabetes Study - CGM Initiation Approach & Time in Range\n\n### Inclusion Criteria\n- Adults >18 years of age\n- T2D diagnosis\n- HbA1c 7.0%-10.0% based on point-of-care test at screening\n- Taking no diabetes medication or taking stable-dose diabetes medication(s) for at least 30 days; willing to maintain stable diabetes medication regimen for the duration of the study\n- Has a personal cellular-plan or wifi-connected smartphone that is compatible with required CGM apps and which will be consistently available for duration of the study\n- Has not used a personal CGM system within 90 days\n- Willing and able to wear CGM and use the associated CGM mobile apps throughout the duration of the study\n- Willing and able to make diet/lifestyle modifications in response to CGM data\n- Able to read an",
+    "meta": {
+      "protocol_id": "NCT05928572_CGM_Initiation",
+      "chunk": 0
+    }
+  },
+  {
+    "doc_id": "protocol::NCT05928572_CGM_Initiation::1",
+    "source": "protocols/NCT05928572_CGM_Initiation.md",
+    "kind": "protocol",
+    "title": "Trial: My Diabetes Study - CGM Initiation Approach & Time in Range",
+    "text": "d understand English\n- Able to attend study visits and complete the requirements of study\n\n### Exclusion Criteria\n- Currently taking or planning to take any form of insulin, sulfonylureas, meglitinides, or other anti-hyperglycemic diabetes medication that carry a known hypoglycemia risk\n- Has used a personal CGM in the 90 days prior to consent\n- Known allergy to medical grade adhesive or isopropyl alcohol used to disinfect skin\n- Skin conditions that are not compatible with CGM wear\n- Intended use of > 4g acetaminophen/day or hydroxyurea during the study\n- Planning to become pregnant; pregnant; or lactating\n- Current participation in another interventional clinical trial\n- Unsuitable for participation due to any other cause, including but not limited to significant comorbidities, as determined by Investigator",
+    "meta": {
+      "protocol_id": "NCT05928572_CGM_Initiation",
+      "chunk": 1
+    }
+  },
+  {
+    "doc_id": "protocol::NCT06864546_Glutotrack::0",
+    "source": "protocols/NCT06864546_Glutotrack.md",
+    "kind": "protocol",
+    "title": "Trial: Glutotrack",
+    "text": "# Trial: Glutotrack\n## ID: NCT06864546\n\n### Description\n(Not provided in snippet, but inferred as T2D study)\n\n### Inclusion Criteria\n- Non-insulin treated T2D diagnosis (not treated at all or only with metformin);\n- Physically inactive (less than 150 minutes/week of moderate physical activity);\n- Age between 40 and 70;\n- HbA1c below 8.5%.\n\n### Exclusion Criteria\n- Diabetes diagnosis less than 3 years before the study initiation;\n- Pregnancy;\n- Symptomatic heart disease, e.g. history of myocardial infarction, coronary bypass, stenting procedure, angina, or any ischemic cerebrovascular event;\n- Use of a medication that significantly impacts glucose metabolism (oral steroids);\n- Use of a medication that significantly lowers heart rate (beta blockers, reserpine, guanethidine, methyldopa, clonidine, cimetidine, digitalis, calcium channel blockers, amiodarone, antiarrhythmic drugs, or lithium)",
+    "meta": {
+      "protocol_id": "NCT06864546_Glutotrack",
+      "chunk": 0
+    }
+  },
+  {
+    "doc_id": "protocol::NCT06864546_Glutotrack::1",
+    "source": "protocols/NCT06864546_Glutotrack.md",
+    "kind": "protocol",
+    "title": "Trial: Glutotrack",
+    "text": ";\n- Atrial fibrillation;\n- Use of an electronic pacemaker.",
+    "meta": {
+      "protocol_id": "NCT06864546_Glutotrack",
+      "chunk": 1
+    }
+  }
+]
