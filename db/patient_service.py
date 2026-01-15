@@ -404,18 +404,22 @@ def find_candidates(protocol_id: str, top_k: int = 5) -> Dict[str, Any]:
     # aggregate per patient_id
     agg: Dict[str, Dict[str, Any]] = {}
     for h in patient_hits:
-        meta = h.get("meta", {}) or {}
+        meta = getattr(h, "meta", {}) or {}
         pid = meta.get("patient_id", "")
         if not pid:
             continue
+
         if pid not in agg:
             agg[pid] = {
                 "patient_id": pid,
                 "score": 0.0,
                 "evidence_patient": [],
             }
-        agg[pid]["score"] = max(agg[pid]["score"], float(h.get("score", 0.0)))
-        txt = (h.get("text") or "").strip()
+
+        score = getattr(h, "score", 0.0)
+        agg[pid]["score"] = max(agg[pid]["score"], float(score))
+
+        txt = (getattr(h, "text", "") or "").strip()
         if txt:
             agg[pid]["evidence_patient"].append(txt[:260])
 
@@ -434,8 +438,14 @@ def find_candidates(protocol_id: str, top_k: int = 5) -> Dict[str, Any]:
         top_n=8,
         filters={"doc_type": ["protocol"], "protocol_id": [protocol_id]},
     )
-    protocol_context = "\n\n".join([(x.get("text") or "")[:500] for x in protocol_hits if x.get("text")])[:2500]
-    protocol_evidence_snips = [(x.get("text") or "")[:220] for x in protocol_hits if x.get("text")][:3]
+
+    protocol_context = "\n\n".join(
+        [(getattr(x, "text", "") or "")[:500] for x in protocol_hits if getattr(x, "text", "")]
+    )[:2500]
+
+    protocol_evidence_snips = [
+                                  (getattr(x, "text", "") or "")[:220] for x in protocol_hits if getattr(x, "text", "")
+                              ][:3]
 
     # 4) LLM evaluate each candidate
     model = _init_gemini()

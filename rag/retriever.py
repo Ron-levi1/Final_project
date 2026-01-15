@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import faiss
 import numpy as np
@@ -12,8 +12,10 @@ from sentence_transformers import SentenceTransformer
 
 
 RAG_DIR = Path(__file__).resolve().parent
-STORE_DIR = RAG_DIR / "rag_store"
+PROJECT_DIR = RAG_DIR.parent
 
+# ✅ Single source of truth: project_root/rag_store
+STORE_DIR = PROJECT_DIR / "rag_store"
 INDEX_PATH = STORE_DIR / "faiss.index"
 DOCS_PATH = STORE_DIR / "docs.jsonl"
 
@@ -64,17 +66,25 @@ class RagRetriever:
         query: str,
         top_k: int = 5,
         where: Optional[Dict[str, str]] = None,
+        *,
+        # ✅ Backward-compatible API (used by db/patient_service.py)
+        top_n: Optional[int] = None,
+        filters: Optional[Dict[str, List[str]]] = None,
     ) -> List[SearchHit]:
         """
         Semantic search over all documents.
-        Optional 'where' filter by meta fields (client-side filter).
-        Example:
-          where={"doc_type": "protocol", "protocol_id": "NCT05928572_CGM_Initiation"}
+
+        - where: exact match filter  { "protocol_id": "X" }
+        - filters: list membership   { "doc_type": ["protocol","patient_note"] }
+        - top_n: alias for top_k
         """
+        if top_n is not None:
+            top_k = int(top_n)
+
         qv = self._embed(query)
 
-        # We may need to fetch more than top_k if we plan to filter
-        fetch_k = max(top_k, 30) if where else top_k
+        do_filtering = bool(where) or bool(filters)
+        fetch_k = max(top_k, 80) if do_filtering else top_k
 
         scores, ids = self.index.search(qv, fetch_k)
         scores = scores[0].tolist()
@@ -84,13 +94,28 @@ class RagRetriever:
         for score, idx in zip(scores, ids):
             if idx == -1:
                 continue
+
             d = self.docs[idx]
             meta = d.get("meta", {}) or {}
 
+            # exact filtering
             if where:
                 ok = True
                 for k, v in where.items():
                     if str(meta.get(k, "")) != str(v):
+                        ok = False
+                        break
+                if not ok:
+                    continue
+
+            # list-membership filtering
+            if filters:
+                ok = True
+                for k, allowed in filters.items():
+                    if not isinstance(allowed, list):
+                        allowed = [str(allowed)]
+                    allowed_s = set(str(x) for x in allowed)
+                    if str(meta.get(k, "")) not in allowed_s:
                         ok = False
                         break
                 if not ok:
@@ -103,9 +128,6 @@ class RagRetriever:
         return hits
 
     def get_protocol_chunks(self, protocol_id: str, top_k: int = 8) -> List[SearchHit]:
-        """
-        Pull the most relevant chunks for a specific protocol (by protocol_id).
-        """
         return self.search(
             query=f"Eligibility criteria inclusion exclusion for protocol {protocol_id}",
             top_k=top_k,
@@ -113,9 +135,4 @@ class RagRetriever:
         )
 
     def search_patients(self, query: str, top_k: int = 10) -> List[SearchHit]:
-        """
-        Search across patient structured + patient note docs.
-        """
-        # We do not filter doc_type here so it can return both structured and notes,
-        # but we can restrict if you want later.
         return self.search(query=query, top_k=top_k, where=None)

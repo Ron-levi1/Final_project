@@ -27,7 +27,7 @@ DATA_DIR = PROJECT_DIR / "rag_data"                     # .../Final_project/rag_
 PATIENTS_DIR = DATA_DIR / "patients"                    # .../Final_project/rag_data/patients
 PROTOCOLS_DIR = DATA_DIR / "protocols"                  # .../Final_project/rag_data/protocols
 
-STORE_DIR = RAG_DIR / "rag_store"                       # .../Final_project/rag/rag_store
+STORE_DIR = PROJECT_DIR / "rag_store"                   # .../Final_project/rag/rag_store
 
 INDEX_PATH = STORE_DIR / "faiss.index"
 DOCS_PATH = STORE_DIR / "docs.jsonl"
