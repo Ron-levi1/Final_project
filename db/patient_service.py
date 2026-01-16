@@ -1,514 +1,313 @@
-# db/patient_service.py
 from __future__ import annotations
 
 import json
-import os
-import re
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
-import google.generativeai as genai
+import pandas as pd
 
-# RAG retriever
 from rag.retriever import RagRetriever
 
 
 # ============================================================
-# Paths (fits your structure)
+# Paths
 # ============================================================
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]  # .../Final_project
-RAG_DATA_DIR = PROJECT_DIR / "rag_data"
-PATIENTS_DIR = RAG_DATA_DIR / "patients"
-PROTOCOLS_DIR = RAG_DATA_DIR / "protocols"
+DB_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = DB_DIR.parent
 
-DB_DIR = PROJECT_DIR / "db_store"
-DB_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR = PROJECT_DIR / "rag_data"
+PROTOCOLS_DIR = DATA_DIR / "protocols"
+PATIENTS_DIR = DATA_DIR / "patients"
 
-PATIENTS_JSON = DB_DIR / "patients.json"
-PROTOCOLS_JSON = DB_DIR / "protocols.json"
+DB_STORE = PROJECT_DIR / "db_store"
+DB_STORE.mkdir(parents=True, exist_ok=True)
+
+PROTOCOLS_JSON = DB_STORE / "protocols.json"
+PATIENTS_JSON = DB_STORE / "patients.json"
 
 
 # ============================================================
-# Helpers: IO
+# Utilities
 # ============================================================
+
+def _ensure_dirs() -> None:
+    DB_STORE.mkdir(parents=True, exist_ok=True)
+    PROTOCOLS_DIR.mkdir(parents=True, exist_ok=True)
+    PATIENTS_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def _load_json(path: Path, default):
     if not path.exists():
         return default
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
-def _save_json(path: Path, obj) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+
+def _save_json(path: Path, data) -> None:
     with path.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-def _ensure_dirs() -> None:
-    PATIENTS_DIR.mkdir(parents=True, exist_ok=True)
-    PROTOCOLS_DIR.mkdir(parents=True, exist_ok=True)
-
-def _clean_text(s: str) -> str:
-    if not s:
-        return ""
-    s = s.replace("\u00a0", " ")
-    s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n{3,}", "\n\n", s)
-    return s.strip()
 
 def _normalize_sex(value: Any) -> str:
     if value is None:
         return ""
     v = str(value).strip().lower()
-    if v in ["m", "male"]:
-        return "Male"
     if v in ["f", "female"]:
         return "Female"
+    if v in ["m", "male"]:
+        return "Male"
     return str(value).strip()
 
-def _is_missing(value: Any) -> bool:
-    v = str(value).strip().lower()
-    return v in ["", "none", "nan", "null"]
 
-def _read_bytes_as_text(file_bytes: bytes, filename: str) -> str:
-    """
-    TXT/MD: decode
-    PDF/DOCX: we don't parse here; we index via rag/index_all (already handles those)
-    For extraction (age/sex), we only do reliable extraction from TXT/MD.
-    """
-    suf = Path(filename).suffix.lower()
-    if suf in [".txt", ".md"]:
-        return _clean_text(file_bytes.decode("utf-8", errors="ignore"))
-    return ""
-
-def _extract_age_sex_from_text(text: str) -> Tuple[Optional[int], str]:
-    """
-    Simple heuristic extraction (non-blocking):
-    - Age: look for patterns like "Age: 54", "54 years old", "בן 54", "בת 54"
-    - Sex: look for "sex: male/female", "gender: m/f", "Male/Female"
-    """
-    if not text:
-        return None, ""
-
-    t = text.lower()
-
-    # age
-    age = None
-    age_patterns = [
-        r"\bage\s*[:\-]\s*(\d{1,3})\b",
-        r"\b(\d{1,3})\s*(?:years old|y/o|yo)\b",
-        r"\bבן\s*(\d{1,3})\b",
-        r"\bבת\s*(\d{1,3})\b",
-    ]
-    for pat in age_patterns:
-        m = re.search(pat, t, flags=re.IGNORECASE)
-        if m:
-            try:
-                age = int(m.group(1))
-                break
-            except:
-                pass
-
-    # sex
-    sex = ""
-    sex_patterns = [
-        r"\bsex\s*[:\-]\s*(male|female|m|f)\b",
-        r"\bgender\s*[:\-]\s*(male|female|m|f)\b",
-        r"\b(male|female)\b",
-    ]
-    for pat in sex_patterns:
-        m = re.search(pat, t, flags=re.IGNORECASE)
-        if m:
-            sex = _normalize_sex(m.group(1))
-            break
-
-    return age, sex
+def _patients_csv_path() -> Path:
+    # Your seed file name (as in your screenshot)
+    return PATIENTS_DIR / "patients_for_trial_screening.csv"
 
 
 # ============================================================
-# Auto IDs
-# ============================================================
-
-def _next_patient_id(existing_ids: List[str]) -> str:
-    """
-    Generate P001, P002...
-    """
-    max_n = 0
-    for pid in existing_ids:
-        m = re.match(r"^P(\d+)$", str(pid).strip().upper())
-        if m:
-            max_n = max(max_n, int(m.group(1)))
-    return f"P{max_n + 1:03d}"
-
-
-# ============================================================
-# Gemini LLM
-# ============================================================
-
-def _get_gemini_key() -> str:
-    key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError(
-            "Missing GEMINI_API_KEY environment variable.\n"
-            "Set it in PyCharm: Run -> Edit Configurations -> Environment variables\n"
-            "Example: GEMINI_API_KEY=YOUR_KEY"
-        )
-    return key
-
-def _init_gemini():
-    genai.configure(api_key=_get_gemini_key())
-    # model you already use / can use:
-    return genai.GenerativeModel("gemini-2.5-flash")
-
-def _safe_json_load(s: str) -> Dict[str, Any]:
-    """
-    Gemini sometimes wraps JSON in ```json ... ```
-    """
-    if not s:
-        return {}
-    s = s.strip()
-    s = re.sub(r"^```json\s*", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"^```\s*", "", s)
-    s = re.sub(r"\s*```$", "", s)
-    try:
-        return json.loads(s)
-    except:
-        # last resort: find first { ... } block
-        m = re.search(r"(\{.*\})", s, flags=re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group(1))
-            except:
-                return {}
-        return {}
-
-
-def _llm_match_one(
-    model,
-    protocol_id: str,
-    protocol_context: str,
-    patient_id: str,
-    patient_context: str,
-) -> Dict[str, Any]:
-    """
-    Returns:
-    {
-      decision: "Eligible"|"Not eligible"|"Uncertain",
-      confidence: float 0..1,
-      reason: str (one sentence, evidence-based),
-      missing_fields: ["age","sex"] optional,
-      evidence_protocol: [snippets],
-      evidence_patient: [snippets]
-    }
-    """
-
-    prompt = f"""
-You are a clinical trial recruitment assistant.
-
-TASK:
-Given a clinical trial protocol context and a patient context, decide if the patient is Eligible, Not eligible, or Uncertain.
-You must be conservative: if key data is missing, choose "Uncertain" and list missing fields.
-
-OUTPUT RULES:
-Return ONLY valid JSON with exactly these keys:
-- decision: "Eligible" | "Not eligible" | "Uncertain"
-- confidence: number between 0 and 1
-- reason: one short sentence explaining WHY (must cite evidence from the provided contexts)
-- missing_fields: list of strings (e.g., ["age","sex"]) or []
-- evidence_protocol: list of 1-3 short snippets copied from PROTOCOL context
-- evidence_patient: list of 1-3 short snippets copied from PATIENT context
-
-IMPORTANT:
-- Do not invent facts.
-- Use only the text given below.
-- If unsure or missing data, decision must be "Uncertain".
-
-PROTOCOL_ID: {protocol_id}
-
-PROTOCOL CONTEXT:
-{protocol_context}
-
-PATIENT_ID: {patient_id}
-
-PATIENT CONTEXT:
-{patient_context}
-""".strip()
-
-    resp = model.generate_content(prompt)
-    text = resp.text if hasattr(resp, "text") else str(resp)
-    data = _safe_json_load(text)
-
-    # harden defaults
-    decision = data.get("decision", "Uncertain")
-    if decision not in ["Eligible", "Not eligible", "Uncertain"]:
-        decision = "Uncertain"
-
-    conf = data.get("confidence", 0.0)
-    try:
-        conf = float(conf)
-    except:
-        conf = 0.0
-    conf = max(0.0, min(1.0, conf))
-
-    out = {
-        "decision": decision,
-        "confidence": conf,
-        "reason": str(data.get("reason", "")).strip(),
-        "missing_fields": data.get("missing_fields") if isinstance(data.get("missing_fields"), list) else [],
-        "evidence_protocol": data.get("evidence_protocol") if isinstance(data.get("evidence_protocol"), list) else [],
-        "evidence_patient": data.get("evidence_patient") if isinstance(data.get("evidence_patient"), list) else [],
-    }
-    return out
-
-
-# ============================================================
-# Public API used by Streamlit
+# Protocols (used by UI)
 # ============================================================
 
 def list_protocols() -> List[Dict[str, Any]]:
-    _ensure_dirs()
-    return _load_json(PROTOCOLS_JSON, [])
-
-def list_patients_summary() -> List[Dict[str, Any]]:
-    _ensure_dirs()
-    patients = _load_json(PATIENTS_JSON, [])
-    # summary only
-    out = []
-    for p in patients:
-        out.append({
-            "patient_id": p.get("patient_id", ""),
-            "age": p.get("age", ""),
-            "sex": _normalize_sex(p.get("sex", "")),
-        })
-    return out
-
-def add_protocol(file_bytes: bytes, filename: str) -> Dict[str, Any]:
     """
-    Save protocol file under rag_data/protocols and trigger re-index (RAG).
-    protocol_id is derived from file name stem (no manual ID).
+    Returns protocols for UI.
+    MUST include keys used by streamlit_app:
+      - protocol_id
+      - title
+      - file
+    Seeds automatically from rag_data/protocols if JSON is empty.
     """
     _ensure_dirs()
-
-    p = Path(filename)
-    protocol_id = p.stem.strip()
-
-    # save file
-    save_path = PROTOCOLS_DIR / filename
-    save_path.write_bytes(file_bytes)
-
-    # title heuristic: first markdown heading, else protocol_id
-    title = protocol_id
-    if p.suffix.lower() in [".md", ".txt"]:
-        txt = _read_bytes_as_text(file_bytes, filename)
-        m = re.search(r"^#\s+(.+)$", txt, flags=re.MULTILINE)
-        if m:
-            title = m.group(1).strip()
-
     protocols = _load_json(PROTOCOLS_JSON, [])
-    # upsert
-    protocols = [x for x in protocols if x.get("protocol_id") != protocol_id]
-    protocols.append({"protocol_id": protocol_id, "title": title, "file": filename})
-    protocols.sort(key=lambda x: x["protocol_id"])
+
+    protocol_files = [
+        p for p in PROTOCOLS_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() in [".md", ".txt", ".docx", ".pdf"]
+    ]
+    by_stem = {p.stem: p.name for p in protocol_files}
+
+    changed = False
+
+    if not protocols:
+        # Seed from folder
+        protocols = []
+        for p in sorted(protocol_files, key=lambda x: x.stem.lower()):
+            protocols.append(
+                {"protocol_id": p.stem, "title": p.stem, "file": p.name}
+            )
+        changed = True
+    else:
+        # Ensure required keys exist
+        for pr in protocols:
+            pid = str(pr.get("protocol_id", "")).strip()
+            if not pid:
+                continue
+
+            if "title" not in pr or not pr.get("title"):
+                pr["title"] = pid
+                changed = True
+
+            if "file" not in pr or not pr.get("file"):
+                pr["file"] = by_stem.get(pid, f"{pid}.md")
+                changed = True
+
+        protocols.sort(key=lambda x: str(x.get("protocol_id", "")).lower())
+
+    if changed:
+        _save_json(PROTOCOLS_JSON, protocols)
+
+    return protocols
+
+
+def add_protocol(protocol_id: str, title: str, file_name: str) -> None:
+    """
+    Used by UI upload flow (if you still have it in Protocols tab).
+    This only registers in protocols.json. The actual file should be saved by the UI into rag_data/protocols.
+    """
+    _ensure_dirs()
+    protocols = _load_json(PROTOCOLS_JSON, [])
+
+    protocols.append(
+        {"protocol_id": protocol_id, "title": title, "file": file_name}
+    )
     _save_json(PROTOCOLS_JSON, protocols)
 
-    # re-index all (simple + reliable)
-    from rag.index_all import index_all
-    index_all()
 
-    return {"protocol_id": protocol_id, "title": title, "chunks_added": "reindexed"}
+# ============================================================
+# Patients (used by UI)
+# ============================================================
 
-def add_patient_note(file_bytes: bytes, filename: str) -> Dict[str, Any]:
+def list_patients_summary(limit: int = 500) -> List[Dict[str, Any]]:
     """
-    Create patient automatically (P001...) and save note under rag_data/patients/.
-    No manual fields.
-    Extract age/sex only if TXT/MD has them; otherwise keep empty and warn.
+    Returns a preview table of patients:
+      - patient_id
+      - age
+      - sex
+    Seeds from patients_for_trial_screening.csv if patients.json is empty.
     """
     _ensure_dirs()
-
     patients = _load_json(PATIENTS_JSON, [])
-    existing_ids = [p.get("patient_id", "") for p in patients if p.get("patient_id")]
-    patient_id = _next_patient_id(existing_ids)
 
-    suf = Path(filename).suffix.lower()
-    # save file (prefix with patient id so we can later associate easily)
-    safe_name = f"{patient_id}__{Path(filename).name}"
-    save_path = PATIENTS_DIR / safe_name
-    save_path.write_bytes(file_bytes)
+    csv_path = _patients_csv_path()
+    if not patients and csv_path.exists():
+        df = pd.read_csv(csv_path)
 
-    # extract (only from text types)
-    txt = _read_bytes_as_text(file_bytes, filename)
-    age, sex = _extract_age_sex_from_text(txt)
-    sex = _normalize_sex(sex)
+        # Normalize common column variants
+        col_map = {}
+        for c in df.columns:
+            lc = c.strip().lower()
+            if lc in ["patient_id", "patientid", "id"]:
+                col_map[c] = "patient_id"
+            elif lc in ["age", "patient_age"]:
+                col_map[c] = "age"
+            elif lc in ["sex", "gender"]:
+                col_map[c] = "sex"
+        if col_map:
+            df = df.rename(columns=col_map)
 
-    missing_fields = []
-    if age is None:
-        missing_fields.append("age")
-    if not sex:
-        missing_fields.append("sex")
+        if "patient_id" not in df.columns:
+            df["patient_id"] = [f"ROW_{i}" for i in range(len(df))]
 
-    # store patient record (structured “behind the scenes”)
-    patients.append({
-        "patient_id": patient_id,
-        "age": age if age is not None else "",
-        "sex": sex,
-        "files": [safe_name],
-    })
+        out = []
+        for _, row in df.head(limit).iterrows():
+            out.append(
+                {
+                    "patient_id": str(row.get("patient_id", "")).strip(),
+                    "age": row.get("age", ""),
+                    "sex": _normalize_sex(row.get("sex", "")),
+                }
+            )
+        return out
+
+    # If patients.json has data, keep preview minimal
+    out = []
+    for p in patients[:limit]:
+        out.append(
+            {
+                "patient_id": p.get("patient_id", ""),
+                "age": p.get("age", ""),
+                "sex": _normalize_sex(p.get("sex", "")),
+            }
+        )
+    return out
+
+
+def add_patient_note(patient_id: str, note_text: str) -> None:
+    """
+    Used by UI when uploading a single patient note (TXT/PDF/DOCX).
+    This function only stores a lightweight registry in patients.json.
+    The UI should save the actual file under rag_data/patients and you should re-index.
+    """
+    _ensure_dirs()
+    patients = _load_json(PATIENTS_JSON, [])
+
+    patients.append({"patient_id": patient_id, "note": note_text})
     _save_json(PATIENTS_JSON, patients)
 
-    # index
-    from rag.index_all import index_all
-    index_all()
 
-    # tiny preview only if TXT
-    txt_preview = ""
-    if suf == ".txt" and txt:
-        txt_preview = txt[:500].strip()
+# ============================================================
+# RAG Matching (used by Request tab)
+# ============================================================
 
-    return {
-        "patient_id": patient_id,
-        "chunks_added": "reindexed",
-        "missing_fields": missing_fields,
-        "txt_preview": txt_preview,
-    }
-
-
-def find_candidates(protocol_id: str, top_k: int = 5) -> Dict[str, Any]:
+def find_candidates(protocol_id: str, request_text: str, top_n: int = 5) -> List[Dict[str, Any]]:
     """
-    LLM + RAG pipeline:
-    1) RAG prefilter: retrieve patient chunks relevant to protocol
-    2) Aggregate by patient_id -> candidate list
-    3) For each candidate: gather patient context + protocol context
-    4) Gemini decides + produces reason + evidence snippets
+    Returns list of candidates for the UI table.
+    Keys expected by the UI (based on your screenshot):
+      - patient_id
+      - age
+      - sex
+      - reason  (evidence-based)
     """
-    _ensure_dirs()
+    rr = RagRetriever()
 
-    protocols = _load_json(PROTOCOLS_JSON, [])
-    prot = next((p for p in protocols if p.get("protocol_id") == protocol_id), None)
-    if not prot:
-        return {"results": []}
+    # 1) build a query that is protocol-aware
+    protocol_hits = rr.get_protocol_chunks(protocol_id, top_k=6)
+    protocol_context = "\n\n".join([h.text for h in protocol_hits])[:2500]
 
-    # 1) init retriever (loads FAISS + docs.jsonl)
-    retriever = RagRetriever()
+    query = f"""
+Protocol ID: {protocol_id}
 
-    title = prot.get("title", protocol_id)
-    protocol_query = f"{protocol_id} {title} inclusion criteria exclusion criteria eligibility"
+Protocol context:
+{protocol_context}
 
-    # 2) prefilter patient chunks using RAG (no LLM yet)
-    patient_hits = retriever.search(
-        query=protocol_query,
-        top_n=max(80, top_k * 25),
-        filters={"doc_type": ["patient_structured", "patient_note"]},
-    )
+Coordinator request:
+{request_text}
+""".strip()
 
-    # aggregate per patient_id
+    # 2) retrieve many and then aggregate by patient_id
+    hits = rr.search(query=query, top_k=max(40, top_n), where=None)
+
     agg: Dict[str, Dict[str, Any]] = {}
-    for h in patient_hits:
-        meta = getattr(h, "meta", {}) or {}
-        pid = meta.get("patient_id", "")
+    for h in hits:
+        meta = h.meta or {}
+        pid = str(meta.get("patient_id", "")).strip()
         if not pid:
             continue
 
         if pid not in agg:
             agg[pid] = {
                 "patient_id": pid,
-                "score": 0.0,
-                "evidence_patient": [],
+                "score": float(h.score),
+                "reason": "",
             }
+        else:
+            agg[pid]["score"] = max(float(agg[pid]["score"]), float(h.score))
 
-        score = getattr(h, "score", 0.0)
-        agg[pid]["score"] = max(agg[pid]["score"], float(score))
+        if not agg[pid]["reason"]:
+            snippet = (h.text or "").replace("\n", " ").strip()
+            agg[pid]["reason"] = f'Matched based on patient note evidence: "{snippet[:200]}"'
 
-        txt = (getattr(h, "text", "") or "").strip()
-        if txt:
-            agg[pid]["evidence_patient"].append(txt[:260])
+    ranked = sorted(agg.values(), key=lambda x: x["score"], reverse=True)[:top_n]
 
-    if not agg:
-        return {"results": []}
+    # 3) enrich age/sex from CSV if available
+    csv_path = _patients_csv_path()
+    if csv_path.exists() and ranked:
+        df = pd.read_csv(csv_path)
 
-    # rank candidates by retrieval score
-    ranked = sorted(agg.values(), key=lambda x: x["score"], reverse=True)
-    # take more than needed for LLM rerank
-    preselect_n = min(len(ranked), max(top_k * 3, 15))
-    candidates = ranked[:preselect_n]
+        # find id column
+        id_col = None
+        for c in df.columns:
+            if c.strip().lower() in ["patient_id", "patientid", "id"]:
+                id_col = c
+                break
+        if id_col is None:
+            id_col = df.columns[0]
 
-    # 3) protocol context from RAG (protocol chunks only)
-    protocol_hits = retriever.search(
-        query=f"{protocol_id} inclusion exclusion criteria",
-        top_n=8,
-        filters={"doc_type": ["protocol"], "protocol_id": [protocol_id]},
-    )
+        df["_pid"] = df[id_col].astype(str).str.strip()
 
-    protocol_context = "\n\n".join(
-        [(getattr(x, "text", "") or "")[:500] for x in protocol_hits if getattr(x, "text", "")]
-    )[:2500]
+        # normalize potential columns
+        age_col = None
+        sex_col = None
+        for c in df.columns:
+            lc = c.strip().lower()
+            if lc in ["age", "patient_age"]:
+                age_col = c
+            if lc in ["sex", "gender"]:
+                sex_col = c
 
-    protocol_evidence_snips = [
-                                  (getattr(x, "text", "") or "")[:220] for x in protocol_hits if getattr(x, "text", "")
-                              ][:3]
+        for r in ranked:
+            pid = r["patient_id"]
+            row = df[df["_pid"] == pid].head(1)
+            if len(row) == 1:
+                row0 = row.iloc[0]
+                r["age"] = row0[age_col] if age_col else ""
+                r["sex"] = _normalize_sex(row0[sex_col]) if sex_col else ""
+            else:
+                r["age"] = ""
+                r["sex"] = ""
+    else:
+        for r in ranked:
+            r["age"] = ""
+            r["sex"] = ""
 
-    # 4) LLM evaluate each candidate
-    model = _init_gemini()
+    # 4) match UI column name from your screenshot ("Reason (evidence-based)")
+    for r in ranked:
+        r["Reason (evidence-based)"] = r.pop("reason", "")
+        # Keep also "reason" if UI uses it somewhere else
+        r["reason"] = r["Reason (evidence-based)"]
 
-    patients_db = _load_json(PATIENTS_JSON, [])
-    pat_map = {p.get("patient_id"): p for p in patients_db}
-
-    results: List[Dict[str, Any]] = []
-
-    for c in candidates:
-        pid = c["patient_id"]
-
-        # Build patient context:
-        # (a) use the top retrieved evidence we already have
-        patient_context = "\n\n".join(c.get("evidence_patient", [])[:6])
-
-        # (b) add structured summary if exists in db
-        p_rec = pat_map.get(pid, {}) or {}
-        age = p_rec.get("age", "")
-        sex = _normalize_sex(p_rec.get("sex", ""))
-
-        structured_lines = [f"Patient ID: {pid}"]
-        if not _is_missing(age):
-            structured_lines.append(f"Age: {age}")
-        if sex:
-            structured_lines.append(f"Sex: {sex}")
-        structured_block = "\n".join(structured_lines)
-
-        patient_context = (structured_block + "\n\n" + patient_context).strip()[:2500]
-
-        llm_out = _llm_match_one(
-            model=model,
-            protocol_id=protocol_id,
-            protocol_context=protocol_context,
-            patient_id=pid,
-            patient_context=patient_context,
-        )
-
-        # Ensure missing fields also reflect stored record
-        missing_fields = llm_out.get("missing_fields", [])
-        if _is_missing(age) and "age" not in missing_fields:
-            missing_fields.append("age")
-        if not sex and "sex" not in missing_fields:
-            missing_fields.append("sex")
-
-        results.append({
-            "patient_id": pid,
-            "age": age,
-            "sex": sex,
-            "decision": llm_out.get("decision", "Uncertain"),
-            "confidence": llm_out.get("confidence", 0.0),
-            "reason": llm_out.get("reason", ""),
-            "missing_fields": missing_fields,
-            "evidence_protocol": llm_out.get("evidence_protocol") or protocol_evidence_snips,
-            "evidence_patient": llm_out.get("evidence_patient") or c.get("evidence_patient", [])[:3],
-        })
-
-    # Final ranking:
-    # prioritize Eligible > Uncertain > Not eligible, then confidence
-    order = {"Eligible": 2, "Uncertain": 1, "Not eligible": 0}
-    results.sort(key=lambda r: (order.get(r["decision"], 1), float(r.get("confidence", 0.0))), reverse=True)
-
-    # cut to top_k
-    results = results[:top_k]
-
-    return {"results": results}
+    return ranked
