@@ -7,6 +7,8 @@ from typing import Any, Dict, List
 import pandas as pd
 
 from rag.retriever import RagRetriever
+from agent.gemini_judge import judge_with_gemini
+
 
 
 # ============================================================
@@ -213,20 +215,35 @@ def add_patient_note(patient_id: str, note_text: str) -> None:
 # RAG Matching (used by Request tab)
 # ============================================================
 
-def find_candidates(protocol_id: str, request_text: str, top_n: int = 5) -> List[Dict[str, Any]]:
+def find_candidates(
+    protocol_id: str,
+    request_text: str = "",
+    top_k: int = 5,
+) -> Dict[str, Any]:
     """
-    Returns list of candidates for the UI table.
-    Keys expected by the UI (based on your screenshot):
-      - patient_id
-      - age
-      - sex
-      - reason  (evidence-based)
+    LLM Agent flow (LLM + RAG), without changing the UI:
+    1) RAG: retrieve protocol evidence (inclusion/exclusion chunks)
+    2) RAG: retrieve candidate patient docs using request + protocol evidence
+    3) LLM: judge each candidate with Gemini -> decision + confidence (match %)
+    4) Return top_k results for the Request tab
     """
     rr = RagRetriever()
 
-    # 1) build a query that is protocol-aware
-    protocol_hits = rr.get_protocol_chunks(protocol_id, top_k=6)
+    # -------------------------
+    # 1) Protocol evidence (RAG)
+    # -------------------------
+    protocol_hits = rr.get_protocol_chunks(protocol_id, top_k=8)
+    protocol_evidence = [h.text.strip().replace("\n", " ")[:300] for h in protocol_hits if h.text]
+
+    if not protocol_hits:
+        return {"results": []}
+
     protocol_context = "\n\n".join([h.text for h in protocol_hits])[:2500]
+
+    # -------------------------
+    # 2) Candidate retrieval (RAG)
+    # -------------------------
+    request_text = (request_text or "").strip()
 
     query = f"""
 Protocol ID: {protocol_id}
@@ -235,53 +252,55 @@ Protocol context:
 {protocol_context}
 
 Coordinator request:
-{request_text}
+{request_text if request_text else "(no request provided)"}
+
+Goal: retrieve patient candidates who likely match inclusion/exclusion.
 """.strip()
 
-    # 2) retrieve many and then aggregate by patient_id
-    hits = rr.search(query=query, top_k=max(40, top_n), where=None)
+    hits = rr.search(query=query, top_k=max(80, top_k * 20), where=None)
 
-    agg: Dict[str, Dict[str, Any]] = {}
+    # Aggregate evidence by patient_id
+    patient_best_score: Dict[str, float] = {}
+    patient_evidence_map: Dict[str, List[str]] = {}
+
     for h in hits:
         meta = h.meta or {}
         pid = str(meta.get("patient_id", "")).strip()
         if not pid:
             continue
 
-        if pid not in agg:
-            agg[pid] = {
-                "patient_id": pid,
-                "score": float(h.score),
-                "reason": "",
-            }
-        else:
-            agg[pid]["score"] = max(float(agg[pid]["score"]), float(h.score))
+        patient_best_score[pid] = max(patient_best_score.get(pid, -1.0), float(h.score))
 
-        if not agg[pid]["reason"]:
-            snippet = (h.text or "").replace("\n", " ").strip()
-            agg[pid]["reason"] = f'Matched based on patient note evidence: "{snippet[:200]}"'
+        snippet = (h.text or "").strip().replace("\n", " ")
+        if snippet:
+            patient_evidence_map.setdefault(pid, []).append(snippet[:300])
 
-    ranked = sorted(agg.values(), key=lambda x: x["score"], reverse=True)[:top_n]
+    if not patient_best_score:
+        return {"results": []}
 
-    # 3) enrich age/sex from CSV if available
+    # shortlist for LLM (keep it reasonable)
+    shortlist = sorted(patient_best_score.items(), key=lambda x: x[1], reverse=True)[: max(25, top_k * 5)]
+    shortlist_pids = [pid for pid, _ in shortlist]
+
+    # -------------------------
+    # 3) Enrich from CSV (age/sex only for UI)
+    # -------------------------
     csv_path = _patients_csv_path()
-    if csv_path.exists() and ranked:
-        df = pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path) if csv_path.exists() else pd.DataFrame()
 
-        # find id column
-        id_col = None
+    id_col = None
+    if not df.empty:
         for c in df.columns:
             if c.strip().lower() in ["patient_id", "patientid", "id"]:
                 id_col = c
                 break
         if id_col is None:
             id_col = df.columns[0]
-
         df["_pid"] = df[id_col].astype(str).str.strip()
 
-        # normalize potential columns
-        age_col = None
-        sex_col = None
+    age_col = None
+    sex_col = None
+    if not df.empty:
         for c in df.columns:
             lc = c.strip().lower()
             if lc in ["age", "patient_age"]:
@@ -289,25 +308,63 @@ Coordinator request:
             if lc in ["sex", "gender"]:
                 sex_col = c
 
-        for r in ranked:
-            pid = r["patient_id"]
+    results: List[Dict[str, Any]] = []
+
+    # -------------------------
+    # 4) LLM judge (Gemini) per candidate
+    # -------------------------
+    for pid in shortlist_pids:
+        age = ""
+        sex = ""
+
+        if not df.empty:
             row = df[df["_pid"] == pid].head(1)
             if len(row) == 1:
-                row0 = row.iloc[0]
-                r["age"] = row0[age_col] if age_col else ""
-                r["sex"] = _normalize_sex(row0[sex_col]) if sex_col else ""
-            else:
-                r["age"] = ""
-                r["sex"] = ""
-    else:
-        for r in ranked:
-            r["age"] = ""
-            r["sex"] = ""
+                r0 = row.iloc[0]
+                age = r0[age_col] if age_col else ""
+                sex = _normalize_sex(r0[sex_col]) if sex_col else ""
 
-    # 4) match UI column name from your screenshot ("Reason (evidence-based)")
-    for r in ranked:
-        r["Reason (evidence-based)"] = r.pop("reason", "")
-        # Keep also "reason" if UI uses it somewhere else
-        r["reason"] = r["Reason (evidence-based)"]
+        missing_fields = []
+        if str(age).strip() in ["", "nan", "None"]:
+            missing_fields.append("age")
+        if str(sex).strip() in ["", "nan", "None"]:
+            missing_fields.append("sex")
 
-    return ranked
+        patient_summary = {
+            "patient_id": pid,
+            "age": age,
+            "sex": sex,
+            "has_note": bool(patient_evidence_map.get(pid)),
+        }
+
+        patient_evidence = (patient_evidence_map.get(pid) or [])[:8]
+
+        llm = judge_with_gemini(
+            protocol_id=protocol_id,
+            protocol_evidence=protocol_evidence,
+            patient_id=pid,
+            patient_summary=patient_summary,
+            patient_evidence=patient_evidence,
+        )
+
+        match_percent = int(round(float(llm.confidence) * 100))
+
+        results.append({
+            "patient_id": pid,
+            "age": age,
+            "sex": sex,
+            "decision": llm.decision,
+            "confidence": float(llm.confidence),
+            "match_percent": match_percent,
+            "reason": llm.reason_short,
+            "missing_fields": list(dict.fromkeys(missing_fields + (llm.missing_info or []))),
+            "evidence_protocol": protocol_evidence[:6],
+            "evidence_patient": patient_evidence[:6],
+        })
+
+    # Rank: by match %, then by retrieval score
+    score_lookup = {pid: patient_best_score.get(pid, -1.0) for pid in shortlist_pids}
+    results.sort(key=lambda r: (r["match_percent"], score_lookup.get(r["patient_id"], -1.0)), reverse=True)
+    results = results[:top_k]
+
+    return {"results": results}

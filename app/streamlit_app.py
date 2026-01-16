@@ -83,10 +83,21 @@ with tab_request:
 
     top_k = st.number_input("How many patients to retrieve?", min_value=1, max_value=50, value=5, step=1)
 
+    request_text = st.text_area(
+        "Coordinator request (free text)",
+        placeholder="Example: Need CKD patients age 18-70, not pregnant, no dialysis. Need 5 candidates.",
+        height=110,
+    )
+
     if st.button("Find candidates (LLM + RAG)", type="primary"):
         with st.spinner("Running RAG retrieval + Gemini reasoning..."):
             try:
-                out = find_candidates(protocol_id=selected_protocol_id, top_k=int(top_k))
+                out = find_candidates(
+                    protocol_id=selected_protocol_id,
+                    request_text=request_text,
+                    top_k=int(top_k),
+                )
+
             except Exception as e:
                 st.error(f"Failed to retrieve candidates: {e}")
                 st.stop()
@@ -111,6 +122,7 @@ with tab_request:
                     "Sex": sex,
                     "Decision": r.get("decision", "Uncertain"),
                     "Confidence": round(float(r.get("confidence", 0.0)), 2),
+                    "Match %": int(r.get("match_percent", round(float(r.get("confidence", 0.0)) * 100))),
                     "Reason (evidence-based)": r.get("reason", ""),
                 })
 
